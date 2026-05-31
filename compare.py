@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 import requests
 from flask import Flask, request, jsonify
@@ -15,33 +15,43 @@ X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ====================== FULL DETAILED GROK SYSTEM PROMPT ======================
+# ====================== YOUR FULL EXPANDED GROK SYSTEM PROMPT ======================
 GROK_SYSTEM_PROMPT = """
 You are a world-class senior geopolitical intelligence analyst with deep expertise in the Middle East.
 
 You understand:
-- Speech suppression, fear of reprisal, government-controlled narratives, and elite complicity in Iran or Arab countries
+- Speech suppression, fear of reprisal, government-controlled narratives, and elite complicity in the region
 - The challenge of surfacing authentic citizen voices on X under repression, indirect language, diaspora vs inside voices, and propaganda.
-- Historical context of the Arab-Israeli conflict since 1947, rejection of partition plans, multiple Arab-initiated wars, Abraham Accords success vs traditional peace treaties.
+- Historical context of the Arab-Israeli conflict since 1947, rejection of partition plans, multiple wars initiated by Arab states, Abraham Accords success vs traditional peace treaties.
 - Iranian regime vs Iranian people dynamics, proxies (Hezbollah, Hamas), and peace-through-strength approach.
+- US new "Peace through strength" approach 
 
-You are truthful, precise, data-driven, and not afraid to highlight uncomfortable realities. 
+You are unbiased, truthful, precise, data-driven, and not afraid to highlight uncomfortable realities. 
 Focus on real citizen sentiment versus official/traditional narratives. Surface the gap clearly. Do not sugarcoat.
 """
 
 @app.route('/')
 def home():
-    return "✅ Elenchos Compare Backend is Running! (with full Grok prompt)"
+    return "✅ Elenchos Compare Backend is Running! (with full detailed Grok prompt + caching)"
 
 @app.route('/compare', methods=['POST'])
 def compare():
     data = request.get_json(silent=True) or {}
-    search_query = data.get("query", "").strip()
+    search_query = data.get("query", "").strip().lower()
 
     if not search_query:
         return jsonify({"error": "No query provided"}), 400
 
-    # Fetch real X posts
+    # ====================== CACHE CHECK (14 days) ======================
+    cache = supabase.table("saved_comparisons").select("*").eq("query", search_query).execute()
+    if cache.data:
+        record = cache.data[0]
+        created_at = datetime.fromisoformat(record["created_at"].replace("Z", "+00:00"))
+        if datetime.now() - created_at < timedelta(days=14):
+            print(f"✅ Cache hit for: {search_query}")
+            return jsonify(record["full_analysis"])
+
+    # ====================== FETCH REAL X POSTS ======================
     url = "https://api.twitter.com/2/tweets/search/recent"
     headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
     params = {"query": search_query, "max_results": 40}
@@ -54,7 +64,7 @@ def compare():
     except Exception as e:
         print(f"X fetch error: {e}")
 
-    # Call Grok with full prompt
+    # ====================== CALL GROK ======================
     try:
         user_prompt = f"""
 Exact topic searched by user: {search_query}
@@ -77,11 +87,23 @@ Provide deep, truthful analysis of real citizen sentiment versus official/tradit
                 "temperature": 0.25,
                 "response_format": {"type": "json_object"}
             },
-            timeout=60
+            timeout=70
         )
 
         if response.status_code == 200:
             result = json.loads(response.json()["choices"][0]["message"]["content"])
+
+            # Save to cache
+            record = {
+                "query": search_query,
+                "created_at": datetime.now().isoformat(),
+                "full_analysis": result,
+                "citizen_signals": result.get("citizen_signals"),
+                "traditional_narrative": result.get("traditional_narrative"),
+                "divergence_score": result.get("divergence_score", 0)
+            }
+            supabase.table("saved_comparisons").upsert(record).execute()
+
             return jsonify(result)
     except Exception as e:
         print(f"Grok error: {e}")
